@@ -1,0 +1,6 @@
+Django>=4.0
+djangorestframework
+transformers
+fuzzywuzzy
+python-docx
+PyPDF2
