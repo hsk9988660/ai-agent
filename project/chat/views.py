@@ -11,10 +11,13 @@ from transformers import pipeline
 from docx import Document
 from rest_framework.authentication import TokenAuthentication
 from rest_framework.permissions import IsAuthenticated
+from sentence_transformers import SentenceTransformer, util
 import logging
+
 # Load LLM
 # Load the LLM pipeline once to avoid reloading it repeatedly
 try:
+    embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
     qa_model = pipeline("question-answering", model="distilbert-base-uncased-distilled-squad")
 except Exception as e:
     print(f"Error loading LLM model: {e}")
@@ -144,7 +147,7 @@ class AdminLoginView(APIView):
     
 class QueryView(APIView):
     """
-    Handles user queries and provides specific answers based on relevant context.
+    Handles user queries using a Retrieval-Augmented Generation (RAG) approach.
     """
 
     def post(self, request):
@@ -152,65 +155,74 @@ class QueryView(APIView):
         if not query:
             return Response({"error": "No query provided."}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Fetch knowledge base content
-        knowledge_base = KnowledgeBase.objects.first()
-        if not knowledge_base:
-            return Response({"response": "The knowledge base is empty. Please contact the admin."}, 
-                            status=status.HTTP_404_NOT_FOUND)
+        # Check if models are loaded
+        if not embedding_model or not qa_model:
+            return Response(
+                {"response": "Models are unavailable. Please contact the administrator."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE
+            )
 
-        # Find the most relevant context
-        relevant_context = self.find_relevant_context(query, knowledge_base.content)
-        if not relevant_context or len(relevant_context.split()) < 20:  # Ensure the context is valid
+        # Fetch knowledge base content
+        knowledge_base = KnowledgeBase.objects.all()
+        if not knowledge_base.exists():
+            return Response(
+                {"response": "The knowledge base is empty. Please contact the admin."},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        # Retrieve the most relevant context
+        context = self.retrieve_relevant_context(query, knowledge_base)
+        if not context:
             return Response({"response": "I couldn't find enough relevant information for your query."},
                             status=status.HTTP_200_OK)
 
         # Generate response using the QA model
-        response = self.answer_query_with_qa(query, relevant_context)
+        response = self.answer_query_with_qa(query, context)
         return Response({"response": response}, status=status.HTTP_200_OK)
 
-    def find_relevant_context(self, query, knowledge_content):
+    def retrieve_relevant_context(self, query, knowledge_base):
         """
-        Splits knowledge content into paragraphs and finds the most relevant one.
-        Combines strict keyword search with fuzzy matching.
+        Retrieves the top N most relevant contexts using sentence embeddings and cosine similarity.
         """
-        paragraphs = knowledge_content.split("\n\n")  # Split content into paragraphs
-        query_keywords = query.lower().split()
+        paragraphs = [kb.content for kb in knowledge_base if kb.content.strip()]  # Filter empty content
+        if not paragraphs:
+            return None
 
-        # Step 1: Prioritize exact keyword matches (improved logic)
-        for paragraph in paragraphs:
-            if all(keyword in paragraph.lower() for keyword in query_keywords[:2]):  # Top keywords must appear
-                logging.debug("Keyword-based match found.")
-                return paragraph
+        # Generate embeddings for the query and all paragraphs
+        try:
+            query_embedding = embedding_model.encode(query, convert_to_tensor=True)
+            paragraph_embeddings = embedding_model.encode(paragraphs, convert_to_tensor=True)
 
-        # Step 2: Fallback to fuzzy matching if no exact keyword match
-        match, score = process.extractOne(query, paragraphs)
-        logging.debug(f"Fuzzy match score: {score}")
-        if score >= 70 and match.strip():  # Higher threshold to ensure quality
-            return match
+            # Compute cosine similarity
+            similarities = util.pytorch_cos_sim(query_embedding, paragraph_embeddings)[0]
 
-        return None  # Return None if no suitable context is found
+            # Sort paragraphs by similarity score
+            top_indices = similarities.argsort(descending=True)[:3]  # Retrieve top 3 matches
+            top_contexts = [paragraphs[i] for i in top_indices if similarities[i] >= 0.3]  # Threshold = 0.3
 
+            logging.info(f"Top match scores: {[similarities[i].item() for i in top_indices]}")
+            return "\n\n".join(top_contexts) if top_contexts else None
+        except Exception as e:
+            logging.error(f"Error during context retrieval: {e}")
+            return None
 
     def answer_query_with_qa(self, query, context):
         """
-        Generates an answer using the QA model based on the relevant context.
+        Generates an answer using the QA model based on the retrieved context.
         """
-        if not qa_model:
-            return "The QA model is currently unavailable. Please contact the administrator."
-
-        logging.debug(f"Question: {query}")
-        logging.debug(f"Context: {context}")
-
-        # Validate the context before sending it to the model
-        if not context or len(context.split()) < 20:  # Ensure context has enough words
-            return "Sorry, I couldn't find enough relevant information for your query."
+        if not context or len(context.split()) < 10:
+            return "I couldn't find enough relevant information for your query."
 
         try:
-            # Clear and strict prompt for the QA model
             result = qa_model(question=query, context=context)
             answer = result.get("answer", "").strip()
 
-            return answer if answer else "I couldn't find an answer for your query."
+            if answer and len(answer.split()) > 2:  # Validate answer length
+                logging.info(f"Generated Answer: {answer}")
+                return answer
+            else:
+                logging.warning("No valid answer generated by the QA model.")
+                return "I couldn't find a specific answer to your query. Please try rephrasing it."
         except Exception as e:
             logging.error(f"Error generating response: {e}")
             return "Sorry, I couldn't process your query at the moment."
