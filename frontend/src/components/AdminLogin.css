@@ -1,0 +1,86 @@
+/* Overall container styling */
+.login-container {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    height: 100vh;
+    background-color: #1c1c1c;
+    color: #ffffff;
+    font-family: Arial, sans-serif;
+  }
+  
+  /* Login box styling */
+  .login-box {
+    background-color: #2c2c2c;
+    padding: 30px;
+    border-radius: 8px;
+    box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
+    width: 300px;
+    text-align: center;
+  }
+  
+  /* Header styling */
+  .login-header {
+    font-size: 1.5rem;
+    margin-bottom: 20px;
+    color: #61dafb;
+  }
+  
+  /* Error message styling */
+  .login-error {
+    color: #ff5a5a;
+    background-color: #2c1e1e;
+    padding: 10px;
+    border: 1px solid #ff5a5a;
+    border-radius: 4px;
+    margin-bottom: 15px;
+    font-size: 0.9rem;
+  }
+  
+  /* Form group styling */
+  .form-group {
+    margin-bottom: 15px;
+    text-align: left;
+  }
+  
+  .form-group label {
+    display: block;
+    margin-bottom: 5px;
+    font-size: 0.9rem;
+    color: #ffffff;
+  }
+  
+  .form-group input {
+    width: 100%;
+    padding: 8px;
+    border-radius: 4px;
+    border: 1px solid #555555;
+    background-color: #1c1c1c;
+    color: #ffffff;
+    font-size: 0.9rem;
+  }
+  
+  /* Input focus styling */
+  .form-group input:focus {
+    border-color: #61dafb;
+    outline: none;
+  }
+  
+  /* Login button styling */
+  .login-button {
+    width: 100%;
+    padding: 10px;
+    background-color: #61dafb;
+    color: #1c1c1c;
+    font-size: 1rem;
+    font-weight: bold;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: background-color 0.3s ease;
+  }
+  
+  .login-button:hover {
+    background-color: #4a9fcc;
+  }
+  
