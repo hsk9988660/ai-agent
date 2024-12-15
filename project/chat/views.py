@@ -13,6 +13,8 @@ from rest_framework.authentication import TokenAuthentication
 from rest_framework.permissions import IsAuthenticated
 from sentence_transformers import SentenceTransformer, util
 import logging
+import torch
+import re
 
 # Load LLM
 # Load the LLM pipeline once to avoid reloading it repeatedly
@@ -144,85 +146,109 @@ class AdminLoginView(APIView):
             status=status.HTTP_401_UNAUTHORIZED
         )
     
-    
+def preprocess_knowledge_base(knowledge_entries):
+    """
+    Preprocess and split knowledge base content into clean paragraphs.
+    """
+    paragraphs = []
+    for entry in knowledge_entries:
+        content = entry.strip()
+        # Split paragraphs using double newlines or full stops
+        split_content = re.split(r"\n\n|\.\s+", content)
+        cleaned_paragraphs = [para.strip() for para in split_content if len(para.strip()) > 20]  # Min length = 20
+        paragraphs.extend(cleaned_paragraphs)
+    return paragraphs
+
 class QueryView(APIView):
     """
-    Handles user queries using a Retrieval-Augmented Generation (RAG) approach.
+    Handles user queries using Retrieval-Augmented Generation (RAG) approach.
+    Combines multiple top contexts for QA model input.
     """
 
     def post(self, request):
-        query = request.data.get("query")
+        query = request.data.get("query", "").strip()
         if not query:
             return Response({"error": "No query provided."}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Check if models are loaded
+        # Check models
         if not embedding_model or not qa_model:
-            return Response(
-                {"response": "Models are unavailable. Please contact the administrator."},
-                status=status.HTTP_503_SERVICE_UNAVAILABLE
-            )
+            logging.error("Models not loaded.")
+            return Response({"response": "Models are unavailable. Please contact the administrator."},
+                            status=status.HTTP_503_SERVICE_UNAVAILABLE)
 
-        # Fetch knowledge base content
-        knowledge_base = KnowledgeBase.objects.all()
-        if not knowledge_base.exists():
-            return Response(
-                {"response": "The knowledge base is empty. Please contact the admin."},
-                status=status.HTTP_404_NOT_FOUND
-            )
+        # Retrieve knowledge base
+        knowledge_base = self.get_knowledge_base()
+        if not knowledge_base:
+            return Response({"response": "The knowledge base is empty. Please contact the admin."},
+                            status=status.HTTP_404_NOT_FOUND)
 
-        # Retrieve the most relevant context
+        # Retrieve relevant context
         context = self.retrieve_relevant_context(query, knowledge_base)
         if not context:
             return Response({"response": "I couldn't find enough relevant information for your query."},
                             status=status.HTTP_200_OK)
 
-        # Generate response using the QA model
+        # Generate answer
         response = self.answer_query_with_qa(query, context)
         return Response({"response": response}, status=status.HTTP_200_OK)
 
+    def get_knowledge_base(self):
+        """
+        Fetch and preprocess knowledge base content.
+        """
+        try:
+            knowledge_entries = KnowledgeBase.objects.all()
+            paragraphs = [entry.content.strip() for entry in knowledge_entries if entry.content.strip()]
+            return self.preprocess_paragraphs(paragraphs)
+        except Exception as e:
+            logging.error(f"Error fetching knowledge base: {e}")
+            return []
+
+    def preprocess_paragraphs(self, content_list):
+        """
+        Split and clean paragraphs into meaningful chunks.
+        """
+        paragraphs = []
+        for content in content_list:
+            split_content = re.split(r"\n\n|\.\s+", content)  # Split at double newlines or full stops
+            cleaned = [para.strip() for para in split_content if len(para.strip()) > 20]  # Min length = 20
+            paragraphs.extend(cleaned)
+        return paragraphs
+
     def retrieve_relevant_context(self, query, knowledge_base):
         """
-        Retrieves the top N most relevant contexts using sentence embeddings and cosine similarity.
+        Retrieve the top-3 relevant contexts using semantic similarity.
         """
-        paragraphs = [kb.content for kb in knowledge_base if kb.content.strip()]  # Filter empty content
-        if not paragraphs:
-            return None
-
-        # Generate embeddings for the query and all paragraphs
         try:
             query_embedding = embedding_model.encode(query, convert_to_tensor=True)
-            paragraph_embeddings = embedding_model.encode(paragraphs, convert_to_tensor=True)
+            paragraph_embeddings = embedding_model.encode(knowledge_base, convert_to_tensor=True)
 
             # Compute cosine similarity
             similarities = util.pytorch_cos_sim(query_embedding, paragraph_embeddings)[0]
+            top_indices = torch.topk(similarities, k=5).indices  # Top-5 matches
 
-            # Sort paragraphs by similarity score
-            top_indices = similarities.argsort(descending=True)[:3]  # Retrieve top 3 matches
-            top_contexts = [paragraphs[i] for i in top_indices if similarities[i] >= 0.3]  # Threshold = 0.3
-
-            logging.info(f"Top match scores: {[similarities[i].item() for i in top_indices]}")
+            # Combine top paragraphs
+            top_contexts = [knowledge_base[i] for i in top_indices if similarities[i].item() >= 0.2]
             return "\n\n".join(top_contexts) if top_contexts else None
         except Exception as e:
-            logging.error(f"Error during context retrieval: {e}")
+            logging.error(f"Error retrieving context: {e}")
             return None
 
     def answer_query_with_qa(self, query, context):
         """
-        Generates an answer using the QA model based on the retrieved context.
+        Use the QA model to generate an answer based on retrieved context.
         """
-        if not context or len(context.split()) < 10:
-            return "I couldn't find enough relevant information for your query."
-
         try:
+            logging.info(f"QA Model Input - Query: {query}")
+            logging.info(f"QA Model Input - Context: {context}")
+
+            if not context:
+                return "No relevant context found."
+
             result = qa_model(question=query, context=context)
             answer = result.get("answer", "").strip()
 
-            if answer and len(answer.split()) > 2:  # Validate answer length
-                logging.info(f"Generated Answer: {answer}")
-                return answer
-            else:
-                logging.warning("No valid answer generated by the QA model.")
-                return "I couldn't find a specific answer to your query. Please try rephrasing it."
+            return answer if answer else "I couldn't find a specific answer to your query."
         except Exception as e:
             logging.error(f"Error generating response: {e}")
             return "Sorry, I couldn't process your query at the moment."
