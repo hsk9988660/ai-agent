@@ -1,29 +1,19 @@
-from django.shortcuts import get_object_or_404
-from rest_framework.authtoken.models import Token
 from rest_framework.views import APIView
 from rest_framework.response import Response
-from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework import status
 from .models import KnowledgeBase
 from django.contrib.auth import authenticate
-from fuzzywuzzy import process
-from transformers import pipeline
 from docx import Document
 from rest_framework.authentication import TokenAuthentication
 from rest_framework.permissions import IsAuthenticated
-from sentence_transformers import SentenceTransformer, util
 import logging
-import torch
 import re
+import openai
+from dotenv import load_dotenv
+import os
+load_dotenv()
 
-# Load LLM
-# Load the LLM pipeline once to avoid reloading it repeatedly
-try:
-    embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
-    qa_model = pipeline("question-answering", model="distilbert-base-uncased-distilled-squad")
-except Exception as e:
-    print(f"Error loading LLM model: {e}")
-    qa_model = None
+openai.api_key  = os.getenv("OPENAI_API_KEY")
 
     
 class KnowledgeBaseUploadView(APIView):
@@ -159,10 +149,10 @@ def preprocess_knowledge_base(knowledge_entries):
         paragraphs.extend(cleaned_paragraphs)
     return paragraphs
 
+
 class QueryView(APIView):
     """
-    Handles user queries using Retrieval-Augmented Generation (RAG) approach.
-    Combines multiple top contexts for QA model input.
+    Handles user queries using ChatGPT (GPT-4 or GPT-3.5-turbo).
     """
 
     def post(self, request):
@@ -170,87 +160,67 @@ class QueryView(APIView):
         if not query:
             return Response({"error": "No query provided."}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Check models
-        if not embedding_model or not qa_model:
-            logging.error("Models not loaded.")
-            return Response({"response": "Models are unavailable. Please contact the administrator."},
-                            status=status.HTTP_503_SERVICE_UNAVAILABLE)
-
-        # Retrieve knowledge base
+        # Fetch and prepare the knowledge base
         knowledge_base = self.get_knowledge_base()
         if not knowledge_base:
-            return Response({"response": "The knowledge base is empty. Please contact the admin."},
-                            status=status.HTTP_404_NOT_FOUND)
+            return Response(
+                {"response": "The knowledge base is empty. Please contact the admin."},
+                status=status.HTTP_404_NOT_FOUND
+            )
 
-        # Retrieve relevant context
-        context = self.retrieve_relevant_context(query, knowledge_base)
-        if not context:
-            return Response({"response": "I couldn't find enough relevant information for your query."},
-                            status=status.HTTP_200_OK)
+        # Combine query with the knowledge base
+        combined_context = self.prepare_combined_context(knowledge_base)
 
-        # Generate answer
-        response = self.answer_query_with_qa(query, context)
+        # Use ChatGPT to generate an answer
+        response = self.answer_with_chatgpt(query, combined_context)
+
         return Response({"response": response}, status=status.HTTP_200_OK)
 
     def get_knowledge_base(self):
         """
-        Fetch and preprocess knowledge base content.
+        Fetch knowledge base entries and return as a combined string.
         """
         try:
             knowledge_entries = KnowledgeBase.objects.all()
             paragraphs = [entry.content.strip() for entry in knowledge_entries if entry.content.strip()]
-            return self.preprocess_paragraphs(paragraphs)
+            return "\n\n".join(paragraphs) if paragraphs else None
         except Exception as e:
             logging.error(f"Error fetching knowledge base: {e}")
-            return []
-
-    def preprocess_paragraphs(self, content_list):
-        """
-        Split and clean paragraphs into meaningful chunks.
-        """
-        paragraphs = []
-        for content in content_list:
-            split_content = re.split(r"\n\n|\.\s+", content)  # Split at double newlines or full stops
-            cleaned = [para.strip() for para in split_content if len(para.strip()) > 20]  # Min length = 20
-            paragraphs.extend(cleaned)
-        return paragraphs
-
-    def retrieve_relevant_context(self, query, knowledge_base):
-        """
-        Retrieve the top-3 relevant contexts using semantic similarity.
-        """
-        try:
-            query_embedding = embedding_model.encode(query, convert_to_tensor=True)
-            paragraph_embeddings = embedding_model.encode(knowledge_base, convert_to_tensor=True)
-
-            # Compute cosine similarity
-            similarities = util.pytorch_cos_sim(query_embedding, paragraph_embeddings)[0]
-            top_indices = torch.topk(similarities, k=5).indices  # Top-5 matches
-
-            # Combine top paragraphs
-            top_contexts = [knowledge_base[i] for i in top_indices if similarities[i].item() >= 0.2]
-            return "\n\n".join(top_contexts) if top_contexts else None
-        except Exception as e:
-            logging.error(f"Error retrieving context: {e}")
             return None
 
-    def answer_query_with_qa(self, query, context):
+    def prepare_combined_context(self, knowledge_base):
         """
-        Use the QA model to generate an answer based on retrieved context.
+        Format the knowledge base for better input to ChatGPT.
+        """
+        return (
+            "You are a knowledgeable assistant. Use the following knowledge base to answer questions:\n\n"
+            f"{knowledge_base}\n\n"
+            "Please respond to the user's query clearly and concisely using the above information."
+        )
+
+    def answer_with_chatgpt(self, query, combined_context):
+        """
+        Use ChatGPT (GPT-4 or GPT-3.5-turbo) to generate a response.
         """
         try:
-            logging.info(f"QA Model Input - Query: {query}")
-            logging.info(f"QA Model Input - Context: {context}")
+            # Prepare messages for the OpenAI ChatGPT API
+            messages = [
+                {"role": "system", "content": combined_context},
+                {"role": "user", "content": query}
+            ]
 
-            if not context:
-                return "No relevant context found."
+            # Call the ChatGPT model
+            response = openai.ChatCompletion.create(
+                model="gpt-3.5-turbo",  # Use "gpt-3.5-turbo" if GPT-4 is unavailable
+                messages=messages,
+                max_tokens=500,
+                temperature=0.7
+            )
 
-            result = qa_model(question=query, context=context)
-            answer = result.get("answer", "").strip()
-
-            return answer if answer else "I couldn't find a specific answer to your query."
+            # Extract the content from the response
+            return response['choices'][0]['message']['content'].strip()
         except Exception as e:
-            logging.error(f"Error generating response: {e}")
+            logging.error(f"Error generating response from ChatGPT: {e}")
             return "Sorry, I couldn't process your query at the moment."
             
         
