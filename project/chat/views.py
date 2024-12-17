@@ -168,7 +168,7 @@ class QueryView(APIView):
             )
 
         # Combine query with the knowledge base
-        combined_context = self.prepare_combined_context(knowledge_base)
+        combined_context = self.prepare_combined_context(knowledge_base, query)
 
         # Use ChatGPT to generate an answer
         response = self.answer_with_chatgpt(query, combined_context)
@@ -190,19 +190,21 @@ class QueryView(APIView):
             logging.error(f"Error fetching knowledge base: {e}")
             return None
 
-    def prepare_combined_context(self, knowledge_base):
+    def prepare_combined_context(self, knowledge_base, query):
         """
-        Format the knowledge base for better input to ChatGPT.
+        Prepare a STRICT and explicit context to force ChatGPT to answer only from the knowledge base.
         """
         return (
-            "You are an AI assistant tasked with answering questions strictly based on the knowledge base provided. "
-            "Do not use external information or pre-trained knowledge. If the answer is not found in the context, "
-            "politely inform the user that the information is unavailable.\n\n"
-            f"Knowledge Base:\n{knowledge_base}\n\n"
-            "Please provide the answer in clear and concise language. If the answer is lengthy, structure it as a "
-            "numbered list or bullet points for better readability."
+            "You are an AI assistant. Answer ONLY based on the knowledge base provided below. "
+            "If the knowledge base does not contain the answer, respond with exactly:\n"
+            "'I'm sorry, I do not have sufficient information to answer this question based on the provided knowledge base.'\n\n"
+            "Do NOT use external knowledge, pre-trained data, or make assumptions beyond the given knowledge base.\n\n"
+            "Knowledge Base:\n"
+            f"{knowledge_base}\n\n"
+            "Question: {query}\n"
+            "Answer:"
         )
-
+    
     def answer_with_chatgpt(self, query, combined_context):
         """
         Use ChatGPT (GPT-4 or GPT-3.5-turbo) to generate a response.
