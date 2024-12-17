@@ -149,10 +149,9 @@ def preprocess_knowledge_base(knowledge_entries):
         paragraphs.extend(cleaned_paragraphs)
     return paragraphs
 
-
 class QueryView(APIView):
     """
-    Handles user queries using ChatGPT (GPT-4 or GPT-3.5-turbo).
+    Handles user queries using ChatGPT (GPT-4 or GPT-3.5-turbo) and a knowledge base.
     """
 
     def post(self, request):
@@ -183,7 +182,10 @@ class QueryView(APIView):
         try:
             knowledge_entries = KnowledgeBase.objects.all()
             paragraphs = [entry.content.strip() for entry in knowledge_entries if entry.content.strip()]
-            return "\n\n".join(paragraphs) if paragraphs else None
+            if paragraphs:
+                logging.info(f"Knowledge base loaded successfully with {len(paragraphs)} paragraphs.")
+                return "\n\n".join(paragraphs)
+            return None
         except Exception as e:
             logging.error(f"Error fetching knowledge base: {e}")
             return None
@@ -193,9 +195,12 @@ class QueryView(APIView):
         Format the knowledge base for better input to ChatGPT.
         """
         return (
-            "You are a knowledgeable assistant. Use the following knowledge base to answer questions:\n\n"
-            f"{knowledge_base}\n\n"
-            "Please respond to the user's query clearly and concisely using the above information."
+            "You are an AI assistant tasked with answering questions strictly based on the knowledge base provided. "
+            "Do not use external information or pre-trained knowledge. If the answer is not found in the context, "
+            "politely inform the user that the information is unavailable.\n\n"
+            f"Knowledge Base:\n{knowledge_base}\n\n"
+            "Please provide the answer in clear and concise language. If the answer is lengthy, structure it as a "
+            "numbered list or bullet points for better readability."
         )
 
     def answer_with_chatgpt(self, query, combined_context):
@@ -203,26 +208,37 @@ class QueryView(APIView):
         Use ChatGPT (GPT-4 or GPT-3.5-turbo) to generate a response.
         """
         try:
+            if not openai.api_key:
+                raise ValueError("OpenAI API key not found. Please check your environment variables.")
+
             # Prepare messages for the OpenAI ChatGPT API
             messages = [
                 {"role": "system", "content": combined_context},
                 {"role": "user", "content": query}
             ]
 
-            # Call the ChatGPT model
+            # Call the OpenAI API
             response = openai.ChatCompletion.create(
-                model="gpt-3.5-turbo",  # Use "gpt-3.5-turbo" if GPT-4 is unavailable
+                model="gpt-3.5-turbo",
                 messages=messages,
                 max_tokens=500,
-                temperature=0.7
+                temperature=0.5
             )
 
-            # Extract the content from the response
-            return response['choices'][0]['message']['content'].strip()
+            # Validate and format the response
+            if response and response.get("choices"):
+                content = response['choices'][0].get('message', {}).get('content', '').strip()
+                if content:
+                    return content
+                else:
+                    return "I couldn't find a relevant answer in the provided knowledge base."
+
+            return "I'm sorry, but I couldn't process your request."
+
         except Exception as e:
-            logging.error(f"Error generating response from ChatGPT: {e}")
-            return "Sorry, I couldn't process your query at the moment."
-            
+            logging.error(f"Error during OpenAI API call: {e}")
+            return "Sorry, I encountered an issue processing your query. Please try again later."
+        
         
 class AdminLogoutView(APIView):
     authentication_classes = [TokenAuthentication]
